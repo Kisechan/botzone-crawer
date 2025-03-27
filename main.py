@@ -130,6 +130,15 @@ def download_worker():
             with print_lock:
                 print(f"[{thread_name}] 下载失败 [{filename}], 耗时: {elapsed:.2f}秒, 错误: {str(e)}")
 
+            try:
+                if os.path.exists(save_path):
+                    os.remove(save_path)
+                    with print_lock:
+                        print(f"[{thread_name}] 已清理未完成文件 [{filename}]")
+            except Exception as cleanup_error:
+                with print_lock:
+                    print(f"[{thread_name}] 清理文件失败 [{filename}], 错误: {str(cleanup_error)}")
+
             with stats_lock:
                 failed_urls.append(url)
 
