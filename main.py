@@ -25,11 +25,13 @@ DOWNLOAD_TIMEOUT = 30   # 下载超时时间(秒)
 download_queue = Queue()
 print_lock = threading.Lock()
 stats_lock = threading.Lock()
+progress_lock = threading.Lock()
 
-# 统计变量
+# 统计变量和进度跟踪
 success_count = 0
 failed_urls = []
 skipped_count = 0
+progress_info = {}
 
 def create_download_dir():
     # 创建下载目录
@@ -58,7 +60,24 @@ def get_file_links():
 
     return links
 
+def update_progress(thread_name, filename, percent):
+    with progress_lock:
+        progress_info[thread_name] = (filename, percent)
+
+        if os.name == 'nt':
+            # Windows
+            os.system('cls')
+        else:
+            # Linux/Mac
+            os.system('clear')
+
+        print("当前下载进度：")
+        for name, (file, pct) in progress_info.items():
+            print(f"{name}: {file} - {pct:.1f}%")
+        print("\n")
+
 def download_worker():
+    thread_name = threading.current_thread().name
     while True:
         url = download_queue.get()
         if url is None:
@@ -74,13 +93,13 @@ def download_worker():
                 global skipped_count
                 skipped_count += 1
             with print_lock:
-                print(f"[线程 {threading.current_thread().name}] 文件已存在，跳过 [{filename}]")
+                print(f"[{thread_name}] 文件已存在，跳过 [{filename}]")
             download_queue.task_done()
             continue
 
         try:
             with print_lock:
-                print(f"[线程 {threading.current_thread().name}] 开始下载 [{filename}]")
+                print(f"[{thread_name}] 开始下载 [{filename}]")
 
             response = requests.get(url, headers=REQUEST_HEADERS, stream=True,
                                     timeout=DOWNLOAD_TIMEOUT, verify=False)
@@ -96,12 +115,11 @@ def download_worker():
                         downloaded_size += len(chunk)
                         if total_size > 0:
                             percent = downloaded_size / total_size * 100
-                            with print_lock:
-                                print(f"\r[线程 {threading.current_thread().name}] 下载进度: {percent:.1f}%", end='', flush=True)
+                            # update_progress(thread_name, filename, percent)
 
             elapsed = (datetime.now() - start_time).total_seconds()
             with print_lock:
-                print(f"\n[线程 {threading.current_thread().name}] 下载完成 [{filename}], 耗时: {elapsed:.2f}秒")
+                print(f"[{thread_name}] 下载完成 [{filename}], 耗时: {elapsed:.2f}秒")
 
             with stats_lock:
                 global success_count
@@ -110,10 +128,15 @@ def download_worker():
         except Exception as e:
             elapsed = (datetime.now() - start_time).total_seconds()
             with print_lock:
-                print(f"[线程 {threading.current_thread().name}] 下载失败 [{filename}], 耗时: {elapsed:.2f}秒, 错误: {str(e)}")
+                print(f"[{thread_name}] 下载失败 [{filename}], 耗时: {elapsed:.2f}秒, 错误: {str(e)}")
 
             with stats_lock:
                 failed_urls.append(url)
+
+        with progress_lock:
+            if thread_name in progress_info:
+                del progress_info[thread_name]
+            # update_progress(thread_name, "", 0)  # 更新显示
 
         download_queue.task_done()
 
@@ -128,7 +151,7 @@ def main():
         return
 
     print(f"找到 {len(file_links)} 个待下载文件")
-    print(f"启动 {THREAD_NUM} 个下载线程...")
+    print(f"启动 {THREAD_NUM} 个下载线程...\n")
 
     # 启动工作线程
     threads = []
@@ -149,6 +172,12 @@ def main():
         download_queue.put(None)
     for t in threads:
         t.join()
+
+    # 清屏
+    if os.name == 'nt':
+        os.system('cls')
+    else:
+        os.system('clear')
 
     print("\n下载结果汇总：")
     print(f"成功下载: {success_count} 个")
