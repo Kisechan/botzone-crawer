@@ -47,16 +47,29 @@ def download_file(url, retry_count=0):
     filename = os.path.basename(url)
     save_path = os.path.join(DOWNLOAD_DIR, filename)
 
+    # 检查文件是否已存在
+    if os.path.exists(save_path):
+        print(f"文件已存在，跳过下载 [{filename}]")
+        return True
+
     try:
         print(f"开始下载 [{filename}]")
         response = requests.get(url, headers=REQUEST_HEADERS, stream=True, timeout=30, verify=False)
         response.raise_for_status()
 
+        total_size = int(response.headers.get('content-length', 0))
+        downloaded_size = 0
+
         with open(save_path, 'wb') as f:
             for chunk in response.iter_content(chunk_size=8192):
                 if chunk:
                     f.write(chunk)
-        print(f"下载完成 [{filename}]")
+                    downloaded_size += len(chunk)
+                    if total_size > 0:
+                        percent = downloaded_size / total_size * 100
+                        print(f"\r下载进度: {percent:.1f}%", end='', flush=True)
+
+        print(f"\n下载完成 [{filename}]")
         return True
 
     except Exception as e:
@@ -80,9 +93,18 @@ def main():
 
     success_count = 0
     failed_urls = []
+    skipped_count = 0
 
     for idx, url in enumerate(file_links, 1):
+        filename = os.path.basename(url)
+        save_path = os.path.join(DOWNLOAD_DIR, filename)
+
         print(f"\n正在处理文件 ({idx}/{len(file_links)})")
+
+        if os.path.exists(save_path):
+            print(f"文件已存在，跳过 [{filename}]")
+            skipped_count += 1
+            continue
 
         if not download_file(url):
             failed_urls.append(url)
@@ -90,11 +112,13 @@ def main():
             success_count += 1
 
         if idx < len(file_links):
-            print(f"等待 {DOWNLOAD_INTERVAL} 秒")
-            time.sleep(DOWNLOAD_INTERVAL)
+            if not os.path.exists(save_path) or url in failed_urls:
+                print(f"等待 {DOWNLOAD_INTERVAL} 秒")
+                time.sleep(DOWNLOAD_INTERVAL)
 
     print("\n下载结果汇总：")
     print(f"成功下载: {success_count} 个")
+    print(f"跳过下载: {skipped_count} 个")
     print(f"失败下载: {len(failed_urls)} 个")
 
     if failed_urls:
