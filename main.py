@@ -1,12 +1,14 @@
 import requests
 from bs4 import BeautifulSoup
-import time
 import os
 from urllib.parse import urljoin
 import urllib3
+import threading
+from queue import Queue
+from datetime import datetime
 
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 # 禁用 SSL 报错
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 BASE_URL = 'https://extra.botzone.org.cn/matchpacks/'
 DOWNLOAD_DIR = 'downloaded_files'
@@ -14,8 +16,20 @@ GAME = 'Tetris2'
 REQUEST_HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.3'
 }
-DOWNLOAD_INTERVAL = 5   # 下载间隔（秒）
+
 MAX_RETRIES = 0         # 最大重试次数
+THREAD_NUM = 3          # 线程数量
+DOWNLOAD_TIMEOUT = 30   # 下载超时时间(秒)
+
+# 创建队列和锁
+download_queue = Queue()
+print_lock = threading.Lock()
+stats_lock = threading.Lock()
+
+# 统计变量
+success_count = 0
+failed_urls = []
+skipped_count = 0
 
 def create_download_dir():
     # 创建下载目录
@@ -24,11 +38,13 @@ def create_download_dir():
 def get_file_links():
     # 获取所有符合条件的文件链接
     try:
-        print(f"正在爬取索引页：{BASE_URL}")
+        with print_lock:
+            print(f"正在爬取索引页：{BASE_URL}")
         response = requests.get(BASE_URL, headers=REQUEST_HEADERS, timeout=30, verify=False)
         response.raise_for_status()
     except requests.exceptions.RequestException as e:
-        print(f"无法获取索引页: {e}")
+        with print_lock:
+            print(f"无法获取索引页: {e}")
         return None
 
     soup = BeautifulSoup(response.text, 'html.parser')
@@ -42,42 +58,64 @@ def get_file_links():
 
     return links
 
-def download_file(url, retry_count=0):
-    # 下载文件
-    filename = os.path.basename(url)
-    save_path = os.path.join(DOWNLOAD_DIR, filename)
+def download_worker():
+    while True:
+        url = download_queue.get()
+        if url is None:
+            break
 
-    # 检查文件是否已存在
-    if os.path.exists(save_path):
-        print(f"文件已存在，跳过下载 [{filename}]")
-        return True
+        filename = os.path.basename(url)
+        save_path = os.path.join(DOWNLOAD_DIR, filename)
+        start_time = datetime.now()
 
-    try:
-        print(f"开始下载 [{filename}]")
-        response = requests.get(url, headers=REQUEST_HEADERS, stream=True, timeout=30, verify=False)
-        response.raise_for_status()
+        # 检查文件是否已存在
+        if os.path.exists(save_path):
+            with stats_lock:
+                global skipped_count
+                skipped_count += 1
+            with print_lock:
+                print(f"[线程 {threading.current_thread().name}] 文件已存在，跳过 [{filename}]")
+            download_queue.task_done()
+            continue
 
-        total_size = int(response.headers.get('content-length', 0))
-        downloaded_size = 0
+        try:
+            with print_lock:
+                print(f"[线程 {threading.current_thread().name}] 开始下载 [{filename}]")
 
-        with open(save_path, 'wb') as f:
-            for chunk in response.iter_content(chunk_size=8192):
-                if chunk:
-                    f.write(chunk)
-                    downloaded_size += len(chunk)
-                    if total_size > 0:
-                        percent = downloaded_size / total_size * 100
-                        print(f"\r下载进度: {percent:.1f}%", end='', flush=True)
+            response = requests.get(url, headers=REQUEST_HEADERS, stream=True,
+                                    timeout=DOWNLOAD_TIMEOUT, verify=False)
+            response.raise_for_status()
 
-        print(f"\n下载完成 [{filename}]")
-        return True
+            total_size = int(response.headers.get('content-length', 0))
+            downloaded_size = 0
 
-    except Exception as e:
-        if retry_count < MAX_RETRIES:
-            print(f"下载失败 [{filename}]，正在重试 ({retry_count+1}/{MAX_RETRIES})")
-            return download_file(url, retry_count+1)
-        print(f"最终下载失败 [{filename}]，错误: {str(e)}")
-        return False
+            with open(save_path, 'wb') as f:
+                for chunk in response.iter_content(chunk_size=8192):
+                    if chunk:
+                        f.write(chunk)
+                        downloaded_size += len(chunk)
+                        if total_size > 0:
+                            percent = downloaded_size / total_size * 100
+                            with print_lock:
+                                print(f"\r[线程 {threading.current_thread().name}] 下载进度: {percent:.1f}%", end='', flush=True)
+
+            elapsed = (datetime.now() - start_time).total_seconds()
+            with print_lock:
+                print(f"\n[线程 {threading.current_thread().name}] 下载完成 [{filename}], 耗时: {elapsed:.2f}秒")
+
+            with stats_lock:
+                global success_count
+                success_count += 1
+
+        except Exception as e:
+            elapsed = (datetime.now() - start_time).total_seconds()
+            with print_lock:
+                print(f"[线程 {threading.current_thread().name}] 下载失败 [{filename}], 耗时: {elapsed:.2f}秒, 错误: {str(e)}")
+
+            with stats_lock:
+                failed_urls.append(url)
+
+        download_queue.task_done()
 
 def main():
     create_download_dir()
@@ -90,31 +128,27 @@ def main():
         return
 
     print(f"找到 {len(file_links)} 个待下载文件")
+    print(f"启动 {THREAD_NUM} 个下载线程...")
 
-    success_count = 0
-    failed_urls = []
-    skipped_count = 0
+    # 启动工作线程
+    threads = []
+    for i in range(THREAD_NUM):
+        t = threading.Thread(target=download_worker, name=f"Worker-{i+1}")
+        t.start()
+        threads.append(t)
 
-    for idx, url in enumerate(file_links, 1):
-        filename = os.path.basename(url)
-        save_path = os.path.join(DOWNLOAD_DIR, filename)
+    # 将下载任务加入队列
+    for url in file_links:
+        download_queue.put(url)
 
-        print(f"\n正在处理文件 ({idx}/{len(file_links)})")
+    # 等待所有任务完成
+    download_queue.join()
 
-        if os.path.exists(save_path):
-            print(f"文件已存在，跳过 [{filename}]")
-            skipped_count += 1
-            continue
-
-        if not download_file(url):
-            failed_urls.append(url)
-        else:
-            success_count += 1
-
-        if idx < len(file_links):
-            if not os.path.exists(save_path) or url in failed_urls:
-                print(f"等待 {DOWNLOAD_INTERVAL} 秒")
-                time.sleep(DOWNLOAD_INTERVAL)
+    # 停止工作线程
+    for _ in range(THREAD_NUM):
+        download_queue.put(None)
+    for t in threads:
+        t.join()
 
     print("\n下载结果汇总：")
     print(f"成功下载: {success_count} 个")
@@ -127,4 +161,7 @@ def main():
             print(f"• {url}")
 
 if __name__ == "__main__":
+    start_time = datetime.now()
     main()
+    total_time = (datetime.now() - start_time).total_seconds()
+    print(f"\n总耗时: {total_time:.2f}秒")
