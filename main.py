@@ -183,10 +183,10 @@ def main():
         t.join()
 
     # 清屏
-    if os.name == 'nt':
-        os.system('cls')
-    else:
-        os.system('clear')
+    # if os.name == 'nt':
+    #     os.system('cls')
+    # else:
+    #     os.system('clear')
 
     print("\n下载结果汇总：")
     print(f"成功下载: {success_count} 个")
